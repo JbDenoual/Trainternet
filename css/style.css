@@ -387,6 +387,9 @@ select.input:disabled { color: var(--text-tertiary); }
 .dot--yellow { background: var(--yellow); }
 .dot--orange { background: var(--orange); }
 .dot--red { background: var(--red); }
+/* Niveaux de la prévision (doivent rester alignés sur WINDOW_LEVELS). */
+.dot--visio { background: #4ade80; }
+.dot--fluide { background: #15803d; }
 
 /* ---------- Liste des pings ---------- */
 

@@ -470,8 +470,8 @@ document.querySelectorAll('.detail-tab').forEach((btn) => {
 // trou. Chaque fenêtre reçoit enfin un verdict adapté au télétravail.
 
 const WINDOW_LEVELS = {
-  visio: { label: 'Visio possible', color: COLORS.green },
-  fluide: { label: 'Navigation fluide', color: COLORS.yellow },
+  visio: { label: 'Visio possible', color: '#4ade80' },
+  fluide: { label: 'Navigation fluide', color: '#15803d' },
   hachee: { label: 'Connexion hachée', color: COLORS.orange },
   off: { label: 'Pas de connexion exploitable', color: COLORS.red },
 };
