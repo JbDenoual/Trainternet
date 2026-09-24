@@ -50,35 +50,41 @@
 
   // Positron colorisé : on garde le style gris et on teinte seulement l'eau
   // et la végétation, en pastel pour ne pas concurrencer les couleurs réseau.
-  function tintPositron(glMap) {
-    glMap.getStyle().layers.forEach((layer) => {
+  // La teinte est appliquée au style JSON avant de créer la carte.
+  async function tintedPositron() {
+    const style = await (await fetch(STYLE('positron'))).json();
+    style.layers.forEach((layer) => {
       if (layer.type !== 'fill') return;
+      layer.paint = layer.paint || {};
       const sourceLayer = layer['source-layer'];
-      if (sourceLayer === 'water') glMap.setPaintProperty(layer.id, 'fill-color', '#cfe2f3');
-      if (sourceLayer === 'park') glMap.setPaintProperty(layer.id, 'fill-color', '#e2eed8');
-      if (sourceLayer === 'landcover' && /wood|forest|grass/.test(layer.id)) glMap.setPaintProperty(layer.id, 'fill-color', '#e4efdc');
+      if (sourceLayer === 'water') layer.paint['fill-color'] = '#cfe2f3';
+      if (sourceLayer === 'park') layer.paint['fill-color'] = '#e2eed8';
+      if (sourceLayer === 'landcover' && /wood|forest|grass/.test(layer.id)) layer.paint['fill-color'] = '#e4efdc';
     });
+    return style;
   }
 
   const bases = {
-    m1: { style: 'positron' },
-    m2: { style: 'positron', tint: true },
-    m3: { style: 'liberty' },
-    m4: { style: 'bright' },
+    m1: STYLE('positron'),
+    m2: await tintedPositron(),
+    m3: STYLE('liberty'),
+    m4: STYLE('bright'),
   };
 
-  const maps = Object.entries(bases).map(([id, base]) => {
-    const map = L.map(id);
-    const layer = L.maplibreGL({ style: STYLE(base.style), attribution: ATTRIBUTION }).addTo(map);
-    if (base.tint) {
-      const glMap = layer.getMaplibreMap();
-      glMap.on('load', () => tintPositron(glMap));
+  // Chaque carte est isolée : une erreur sur l'une n'empêche pas les autres.
+  const maps = [];
+  Object.entries(bases).forEach(([id, style]) => {
+    try {
+      const map = L.map(id);
+      L.maplibreGL({ style, attribution: ATTRIBUTION }).addTo(map);
+      for (let i = 1; i < rows.length; i++) {
+        L.polyline([[rows[i - 1].lat, rows[i - 1].lng], [rows[i].lat, rows[i].lng]], { color: color(rows[i]), weight: 5, opacity: 0.9 }).addTo(map);
+      }
+      map.setView([44.95, -0.45], 10);
+      maps.push(map);
+    } catch (err) {
+      document.getElementById(id).textContent = `Impossible d'afficher ce fond : ${err.message}`;
     }
-    for (let i = 1; i < rows.length; i++) {
-      L.polyline([[rows[i - 1].lat, rows[i - 1].lng], [rows[i].lat, rows[i].lng]], { color: color(rows[i]), weight: 5, opacity: 0.9 }).addTo(map);
-    }
-    map.setView([44.95, -0.45], 10);
-    return map;
   });
 
   // Synchronisation : bouger une carte recale les trois autres.
