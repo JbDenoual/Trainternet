@@ -23,11 +23,12 @@ export function colorForWindow(windowPings, thresholds) {
   if (successRate < thresholds.redMaxSuccessRate) return COLORS.red;
   if (successRate < thresholds.orangeMaxSuccessRate) return COLORS.orange;
 
-  // Un seul ping très lent (ou en échec — son temps mesuré correspond au
-  // timeout, donc largement au-delà de ce seuil) rend la fenêtre instable,
-  // même si le taux de succès global reste correct.
-  const maxLatency = Math.max(...windowPings.map((p) => p.elapsedMs));
-  if (maxLatency > thresholds.orangeMinLatencyMs) return COLORS.orange;
+  // Un seul ping inutilisable — en échec, ou réussi mais trop lent — rend la
+  // fenêtre instable, même si le taux de succès global reste correct. Les
+  // échecs sont testés à part : ils sont souvent instantanés (le téléphone
+  // sait déjà qu'il n'a pas de réseau), pas limités par le timeout.
+  const hasUnusable = windowPings.some((p) => !p.success || p.elapsedMs > thresholds.orangeMinLatencyMs);
+  if (hasUnusable) return COLORS.orange;
 
   const successful = windowPings.filter((p) => p.success);
   const avgLatency =
@@ -54,15 +55,6 @@ export function colorForCell(cell, settings) {
   if (cell.slow_count / cell.ping_count >= 1 / settings.rollingWindowSize) return COLORS.orange;
   if (cell.avg_ok_latency_ms > t.yellowMinLatencyMs) return COLORS.yellow;
   return COLORS.green;
-}
-
-// Ordre des catégories du meilleur au pire réseau, utilisé pour regrouper
-// des zones de catégories voisines (ex: bon/lent qui alternent).
-export const CATEGORY_ORDER = [COLORS.green, COLORS.yellow, COLORS.orange, COLORS.red];
-
-export function categoryRank(color) {
-  const rank = CATEGORY_ORDER.indexOf(color);
-  return rank === -1 ? CATEGORY_ORDER.length - 1 : rank;
 }
 
 export function tripSummary(pings, settings) {

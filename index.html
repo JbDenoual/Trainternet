@@ -67,9 +67,9 @@
     <!-- Invité : prévision sur un itinéraire connu -->
     <section id="screen-guest-trip" class="screen screen-map">
       <div class="legend">
-        <span class="legend__item"><span class="dot dot--green"></span>Bon</span>
-        <span class="legend__item"><span class="dot dot--yellow"></span>Lent</span>
-        <span class="legend__item"><span class="dot dot--orange"></span>Instable</span>
+        <span class="legend__item"><span class="dot dot--green"></span>Visio</span>
+        <span class="legend__item"><span class="dot dot--yellow"></span>Fluide</span>
+        <span class="legend__item"><span class="dot dot--orange"></span>Hachée</span>
         <span class="legend__item"><span class="dot dot--red"></span>Coupé</span>
       </div>
       <div id="mapGuestTrip" class="detail-map"></div>
@@ -116,14 +116,14 @@
         <button type="button" class="detail-tab active" data-tab="record">Enregistrement</button>
         <button type="button" class="detail-tab" data-tab="forecast">Prévision</button>
       </div>
-      <div class="legend">
-        <span class="legend__item"><span class="dot dot--green"></span>Bon</span>
-        <span class="legend__item"><span class="dot dot--yellow"></span>Lent</span>
-        <span class="legend__item"><span class="dot dot--orange"></span>Instable</span>
-        <span class="legend__item"><span class="dot dot--red"></span>Coupé</span>
-      </div>
 
       <div id="tabRecord" class="tab-panel">
+        <div class="legend">
+          <span class="legend__item"><span class="dot dot--green"></span>Bon</span>
+          <span class="legend__item"><span class="dot dot--yellow"></span>Lent</span>
+          <span class="legend__item"><span class="dot dot--orange"></span>Instable</span>
+          <span class="legend__item"><span class="dot dot--red"></span>Coupé</span>
+        </div>
         <div id="mapRecord" class="detail-map"></div>
         <div id="gpsStatus" class="status-bar status-bar--gps" style="display:none;">Position GPS : initialisation…</div>
         <div class="status-bar review-summary-row">
@@ -140,6 +140,12 @@
       </div>
 
       <div id="tabForecast" class="tab-panel" style="display:none;">
+        <div class="legend">
+          <span class="legend__item"><span class="dot dot--green"></span>Visio</span>
+          <span class="legend__item"><span class="dot dot--yellow"></span>Fluide</span>
+          <span class="legend__item"><span class="dot dot--orange"></span>Hachée</span>
+          <span class="legend__item"><span class="dot dot--red"></span>Coupé</span>
+        </div>
         <div id="mapForecast" class="detail-map"></div>
         <div class="forecast-controls">
           <label>Sens du trajet</label>
@@ -182,6 +188,15 @@
         <input id="setYellow" class="input" type="number" min="0" step="50" />
         <label for="setOrangeLatency">Latence min pour Instable (ms)</label>
         <input id="setOrangeLatency" class="input" type="number" min="0" step="100" />
+        <p class="hint">Au-delà de cette latence, un ping compte aussi comme inutilisable dans la prévision.</p>
+      </div>
+      <div class="card">
+        <h2 class="card__title">Prévision</h2>
+        <label for="setMinCut">Coupure minimale (minutes)</label>
+        <input id="setMinCut" class="input" type="number" min="0" step="0.5" />
+        <label for="setMinWindow">Fenêtre de travail minimale (minutes)</label>
+        <input id="setMinWindow" class="input" type="number" min="0" step="0.5" />
+        <p class="hint">Une coupure plus courte devient une micro-coupure ; une reprise plus courte est ignorée au milieu d'un trou.</p>
       </div>
       <button id="btnSaveSettings" class="btn btn-primary btn-block">Enregistrer</button>
       <button id="btnSignOut" class="btn btn-ghost btn-block">Se déconnecter</button>

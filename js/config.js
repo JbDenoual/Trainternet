@@ -9,6 +9,11 @@ export const DEFAULT_SETTINGS = {
   pingIntervalMs: 15000,
   pingTimeoutMs: 45000,
   rollingWindowSize: 4,
+  // Prévision en fenêtres de travail : une coupure plus courte que minCutMin
+  // devient une micro-coupure, une reprise plus courte que minWindowMin est
+  // ignorée au milieu d'un trou.
+  minCutMin: 2,
+  minWindowMin: 4,
   thresholds: {
     redMaxSuccessRate: 0.3,
     orangeMaxSuccessRate: 0.7,

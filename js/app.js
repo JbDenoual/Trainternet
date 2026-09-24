@@ -3,7 +3,7 @@ import { getSettings, saveSettings } from './settings.js';
 import { listTrips, getTripPings, getTrip, deleteTrip } from './trips.js';
 import { Recorder } from './recorder.js';
 import { MapView } from './mapView.js';
-import { tripSummary, colorAt, colorForCell, COLORS, categoryRank } from './quality.js';
+import { tripSummary, colorForCell, COLORS } from './quality.js';
 import { getCoverageCells, listPublicRoutes, getPublicRoutePings } from './public.js';
 
 let settings = getSettings();
@@ -459,13 +459,21 @@ document.querySelectorAll('.detail-tab').forEach((btn) => {
   btn.addEventListener('click', () => showDetailTab(btn.dataset.tab));
 });
 
-// ---------- Prévision du signal sur le reste du trajet ----------
+// ---------- Prévision : fenêtres de travail ----------
+//
+// Le réseau en train alterne toutes les une à trois minutes : découper la
+// prévision en zones de couleur produisait des dizaines de zones de moins de
+// cinq minutes, inexploitables. On raisonne plutôt en deux états — un ping
+// est utilisable s'il réussit sous le seuil de latence — puis on absorbe le
+// bruit : une coupure trop courte devient une micro-coupure comptée dans la
+// fenêtre qui l'entoure, une reprise trop courte est ignorée au milieu d'un
+// trou. Chaque fenêtre reçoit enfin un verdict adapté au télétravail.
 
-const CATEGORY_INFO = {
-  [COLORS.green]: { label: 'Bon réseau', dotClass: 'dot--green' },
-  [COLORS.yellow]: { label: 'Réseau lent', dotClass: 'dot--yellow' },
-  [COLORS.orange]: { label: 'Réseau instable', dotClass: 'dot--orange' },
-  [COLORS.red]: { label: 'Pas de réseau', dotClass: 'dot--red' },
+const WINDOW_LEVELS = {
+  visio: { label: 'Visio possible', color: COLORS.green },
+  fluide: { label: 'Navigation fluide', color: COLORS.yellow },
+  hachee: { label: 'Connexion hachée', color: COLORS.orange },
+  off: { label: 'Pas de connexion exploitable', color: COLORS.red },
 };
 
 function defaultTimeString() {
@@ -477,152 +485,100 @@ function formatHM(date) {
   return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
 }
 
-// Un ping isolé qui tranche avec ses voisins immédiats (ex: 3 bons, 1
-// instable, 3 bons) est ignoré pour le regroupement : s'il diffère des 3
-// pings précédents ET des 3 pings suivants, alors que ceux-ci sont tous
-// identiques entre eux, on l'absorbe dans la catégorie environnante plutôt
-// que de créer une zone à part pour un seul point de bruit.
-const NOISE_CONTEXT_SIZE = 3;
-
-function denoiseIsolatedPings(colors) {
-  const result = [...colors];
-  for (let i = NOISE_CONTEXT_SIZE; i < colors.length - NOISE_CONTEXT_SIZE; i++) {
-    const before = colors.slice(i - NOISE_CONTEXT_SIZE, i);
-    const after = colors.slice(i + 1, i + 1 + NOISE_CONTEXT_SIZE);
-    const beforeUniform = before.every((c) => c === before[0]);
-    const afterUniform = after.every((c) => c === after[0]);
-    if (beforeUniform && afterUniform && before[0] === after[0] && colors[i] !== before[0]) {
-      result[i] = before[0];
-    }
-  }
-  return result;
+function isUsable(ping) {
+  return ping.success && ping.elapsedMs <= settings.thresholds.orangeMinLatencyMs;
 }
 
-// La fenêtre glissante regarde en arrière : juste après la fin d'une
-// mauvaise passe, il faut plusieurs pings propres avant qu'elle ne "se
-// nettoie" complètement — des pings réellement bons restent alors comptés
-// dans la zone qui se termine. On corrige en rattachant les derniers pings
-// d'une zone à la zone suivante (meilleure) s'ils sont, à titre individuel,
-// déjà au niveau de celle-ci.
-function trimTrailingRecovery(colors, ordered) {
-  const result = [...colors];
-  let i = 0;
-  while (i < result.length) {
-    let j = i;
-    while (j + 1 < result.length && result[j + 1] === result[i]) j++;
-
-    if (j + 1 < result.length) {
-      const nextColor = result[j + 1];
-      if (categoryRank(nextColor) < categoryRank(result[i])) {
-        let k = j;
-        while (k >= i && categoryRank(pingOwnColor(ordered[k])) <= categoryRank(nextColor)) {
-          result[k] = nextColor;
-          k--;
-        }
-      }
-    }
-    i = j + 1;
-  }
-  return result;
+// Durée couverte par chaque ping : l'écart jusqu'au suivant (le dernier
+// reprend l'écart précédent). Les écarts sont en valeur absolue pour que le
+// sens retour, qui inverse l'ordre des pings, reste positif.
+function pingSpans(ordered) {
+  const gap = (i, j) => Math.abs(new Date(ordered[j].sentAt) - new Date(ordered[i].sentAt));
+  return ordered.map((_, i) => {
+    if (i + 1 < ordered.length) return gap(i, i + 1);
+    return i > 0 ? gap(i - 1, i) : 0;
+  });
 }
 
-// Regroupe les pings consécutifs de même catégorie et calcule la durée de
-// chaque zone à partir des écarts de temps réellement mesurés lors de
-// l'enregistrement (pas de recalcul de vitesse : on reprend le rythme exact).
-function computeRawSegments(pings, direction, settings) {
+function computeWorkWindows(pings, direction) {
   const ordered = direction === 'retour' ? [...pings].reverse() : pings;
-  let colors = denoiseIsolatedPings(ordered.map((_, i) => colorAt(ordered, i, settings)));
-  colors = trimTrailingRecovery(colors, ordered);
-  const gaps = [];
-  for (let i = 0; i < ordered.length - 1; i++) {
-    gaps.push(Math.abs(new Date(ordered[i + 1].sentAt) - new Date(ordered[i].sentAt)));
-  }
+  const spans = pingSpans(ordered);
 
-  const segments = [];
-  let i = 0;
-  while (i < ordered.length) {
-    const color = colors[i];
-    let j = i;
-    while (j + 1 < ordered.length && colors[j + 1] === color) j++;
-
-    let durationMs = 0;
-    for (let k = i; k < j; k++) durationMs += gaps[k];
-    if (j < ordered.length - 1) durationMs += gaps[j];
-
-    segments.push({ color, durationMs, startIndex: i, endIndex: j });
-    i = j + 1;
-  }
-  return { ordered, segments };
-}
-
-// Fusionne les zones courtes qui alternent entre deux catégories voisines
-// (ex: bon/lent, lent/instable) en une seule zone "X à Y" — l'objectif est
-// de réduire les allers-retours de quelques minutes plutôt que de les lister
-// un par un. On ne fusionne que si la nouvelle zone reste au plus 2 (rangs
-// adjacents), et seulement quand l'un des deux côtés est encore "court".
-function mergeAdjacentSegments(segments, thresholdMs) {
-  if (segments.length === 0) return [];
-  const first = segments[0];
-  const groups = [{ ...first, minRank: categoryRank(first.color), maxRank: categoryRank(first.color) }];
-
-  for (let i = 1; i < segments.length; i++) {
-    const seg = segments[i];
-    const segRank = categoryRank(seg.color);
-    const group = groups[groups.length - 1];
-    const newMin = Math.min(group.minRank, segRank);
-    const newMax = Math.max(group.maxRank, segRank);
-    const canMerge = newMax - newMin <= 1 && (seg.durationMs < thresholdMs || group.durationMs < thresholdMs);
-
-    if (canMerge) {
-      group.durationMs += seg.durationMs;
-      group.endIndex = seg.endIndex;
-      group.minRank = newMin;
-      group.maxRank = newMax;
+  const runs = [];
+  ordered.forEach((ping, i) => {
+    const ok = isUsable(ping);
+    const last = runs[runs.length - 1];
+    if (last && last.ok === ok) {
+      last.endIndex = i;
+      last.durationMs += spans[i];
     } else {
-      groups.push({ ...seg, minRank: segRank, maxRank: segRank });
+      runs.push({ ok, startIndex: i, endIndex: i, durationMs: spans[i] });
     }
+  });
+
+  // On absorbe d'abord la période trop courte la plus brève, puis on
+  // recommence : une coupure isolée fusionne ses deux voisines, une période en
+  // bord de trajet rejoint son unique voisine.
+  // Valeurs de repli si le réglage manque : juste après une mise en ligne, le
+  // navigateur peut encore servir un ancien config.js (cache de 10 min de
+  // GitHub Pages) qui ne les définit pas — sans repli, tout fusionnerait en
+  // une seule fenêtre.
+  const minutes = (value, fallback) => (Number.isFinite(value) ? value : fallback) * 60000;
+  const minCutMs = minutes(settings.minCutMin, 2);
+  const minWindowMs = minutes(settings.minWindowMin, 4);
+  while (runs.length > 1) {
+    let k = -1;
+    runs.forEach((run, i) => {
+      if (run.durationMs >= (run.ok ? minWindowMs : minCutMs)) return;
+      if (k === -1 || run.durationMs < runs[k].durationMs) k = i;
+    });
+    if (k === -1) break;
+
+    const from = Math.max(0, k - 1);
+    const to = Math.min(runs.length - 1, k + 1);
+    const neighbour = k === 0 ? runs[1] : runs[k - 1];
+    const merged = runs.slice(from, to + 1);
+    runs.splice(from, merged.length, {
+      ok: neighbour.ok,
+      startIndex: merged[0].startIndex,
+      endIndex: merged[merged.length - 1].endIndex,
+      durationMs: merged.reduce((sum, r) => sum + r.durationMs, 0),
+    });
   }
-  return groups;
+
+  return { ordered, spans, windows: runs.map((run) => describeWindow(ordered, spans, run)) };
 }
 
-// Deux groupes voisins peuvent porter le même intitulé (ex: deux zones
-// "Réseau bon à lent" qui se suivent) si la première a été refermée à cause
-// du seuil de durée avant que la seconde ne commence. Comme le libellé et la
-// couleur seraient identiques, autant les fusionner en une seule entrée.
-function mergeIdenticalAdjacentGroups(groups) {
-  if (groups.length === 0) return [];
-  const result = [{ ...groups[0] }];
-  for (let i = 1; i < groups.length; i++) {
-    const g = groups[i];
-    const last = result[result.length - 1];
-    if (g.minRank === last.minRank && g.maxRank === last.maxRank) {
-      last.durationMs += g.durationMs;
-      last.endIndex = g.endIndex;
+function describeWindow(ordered, spans, run) {
+  const latencies = [];
+  let microCuts = 0;
+  let streakMs = 0;
+  let bestStreakMs = 0;
+  let previousUsable = true;
+  for (let i = run.startIndex; i <= run.endIndex; i++) {
+    const usable = isUsable(ordered[i]);
+    if (usable) {
+      latencies.push(ordered[i].elapsedMs);
+      streakMs += spans[i];
+      bestStreakMs = Math.max(bestStreakMs, streakMs);
     } else {
-      result.push({ ...g });
+      if (previousUsable) microCuts++;
+      streakMs = 0;
     }
+    previousUsable = usable;
   }
-  return result;
-}
 
-const CATEGORY_ADJ = { [COLORS.green]: 'bon', [COLORS.yellow]: 'lent', [COLORS.orange]: 'instable', [COLORS.red]: 'coupé' };
-const RANK_COLOR = [COLORS.green, COLORS.yellow, COLORS.orange, COLORS.red];
+  const usableRatio = latencies.length / (run.endIndex - run.startIndex + 1);
+  latencies.sort((a, b) => a - b);
+  const medianMs = latencies.length ? latencies[Math.floor(latencies.length / 2)] : null;
 
-function groupLabel(group) {
-  if (group.minRank === group.maxRank) return CATEGORY_INFO[RANK_COLOR[group.minRank]].label;
-  return `Réseau ${CATEGORY_ADJ[RANK_COLOR[group.minRank]]} à ${CATEGORY_ADJ[RANK_COLOR[group.maxRank]]}`;
-}
-
-function hexToRgb(hex) {
-  const n = parseInt(hex.replace('#', ''), 16);
-  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
-}
-
-function groupColor(group) {
-  if (group.minRank === group.maxRank) return RANK_COLOR[group.minRank];
-  const a = hexToRgb(RANK_COLOR[group.minRank]);
-  const b = hexToRgb(RANK_COLOR[group.maxRank]);
-  return `rgb(${Math.round((a.r + b.r) / 2)}, ${Math.round((a.g + b.g) / 2)}, ${Math.round((a.b + b.b) / 2)})`;
+  let level = 'off';
+  if (run.ok) {
+    if (usableRatio >= 0.95 && medianMs <= settings.thresholds.yellowMinLatencyMs) level = 'visio';
+    else if (usableRatio >= 0.85) level = 'fluide';
+    else level = 'hachee';
+  }
+  return { ...run, usableRatio, medianMs, microCuts, bestStreakMs, level };
 }
 
 function paintDirectionToggle(allerId, retourId, direction) {
@@ -640,35 +596,25 @@ document.getElementById('btnDirectionAller').addEventListener('click', () => set
 document.getElementById('btnDirectionRetour').addEventListener('click', () => setDirection('retour'));
 document.getElementById('departureTime').addEventListener('change', renderForecast);
 
-// Prévision complète (liste + carte regroupée), partagée entre l'onglet
-// Prévision d'un trajet et l'écran invité.
+// Prévision complète (liste + carte), partagée entre l'onglet Prévision d'un
+// trajet et l'écran invité.
 function drawForecast({ pings, direction, departureValue, listEl, mapView }) {
-  const { ordered, segments } = computeRawSegments(pings, direction, settings);
-  const thresholdMs = settings.rollingWindowSize * settings.pingIntervalMs * 2;
-  const groups = mergeIdenticalAdjacentGroups(mergeAdjacentSegments(segments, thresholdMs));
+  const { ordered, spans, windows } = computeWorkWindows(pings, direction);
 
   const [h, m] = departureValue.split(':').map(Number);
   const departure = new Date();
   departure.setHours(h || 0, m || 0, 0, 0);
 
-  // Heure prévue de chaque ping : départ + temps écoulé depuis le premier
-  // ping dans l'ordre de lecture choisi (aller ou retour).
+  // Heure prévue de chaque ping : départ + temps écoulé dans l'ordre de
+  // lecture choisi (aller ou retour).
   const predicted = [departure];
   for (let i = 1; i < ordered.length; i++) {
-    const gap = Math.abs(new Date(ordered[i].sentAt) - new Date(ordered[i - 1].sentAt));
-    predicted.push(new Date(predicted[i - 1].getTime() + gap));
+    predicted.push(new Date(predicted[i - 1].getTime() + spans[i - 1]));
   }
 
   listEl.innerHTML = '';
-  let cursor = departure;
-  groups.forEach((group) => {
-    const start = cursor;
-    cursor = new Date(cursor.getTime() + group.durationMs);
-    const minutes = Math.max(1, Math.round(group.durationMs / 60000));
-    listEl.appendChild(buildForecastGroupEl(group, ordered, predicted, start, cursor, minutes));
-  });
-
-  mapView.renderGrouped(ordered, groups, (g) => groupColor(g));
+  windows.forEach((win) => listEl.appendChild(buildWindowEl(win, ordered, predicted)));
+  mapView.renderGrouped(ordered, windows, (win) => WINDOW_LEVELS[win.level].color);
 }
 
 function renderForecast() {
@@ -692,19 +638,39 @@ function renderForecast() {
   });
 }
 
-// Ligne de groupe repliable : un clic déplie le détail des pings bruts
-// couverts par ce groupe (heure prévue, position, temps de réponse).
-function buildForecastGroupEl(group, ordered, predicted, start, end, minutes) {
-  const color = groupColor(group);
+function formatDurationMs(ms) {
+  return formatDuration(Math.max(1, Math.round(ms / 60000)));
+}
+
+function windowDetails(win) {
+  const percent = `${Math.round(win.usableRatio * 100)} % utilisable`;
+  if (win.level === 'off') return win.usableRatio > 0 ? percent : '';
+  const cuts = win.microCuts === 0
+    ? 'aucune micro-coupure'
+    : `${win.microCuts} micro-coupure${win.microCuts > 1 ? 's' : ''}`;
+  return `${percent} · ${cuts} · ${formatDurationMs(win.bestStreakMs)} sans coupure au plus`;
+}
+
+// Ligne de fenêtre repliable : un clic déplie le détail des pings bruts
+// qu'elle couvre (heure prévue, position, temps de réponse).
+function buildWindowEl(win, ordered, predicted) {
+  const level = WINDOW_LEVELS[win.level];
+  const start = predicted[win.startIndex];
+  const end = new Date(start.getTime() + win.durationMs);
+  const details = windowDetails(win);
+
   const wrapper = document.createElement('div');
   wrapper.className = 'forecast-group';
 
   const row = document.createElement('div');
-  row.className = 'forecast-row forecast-row--clickable';
+  row.className = `forecast-row forecast-row--clickable${win.level === 'off' ? ' forecast-row--off' : ''}`;
   row.innerHTML = `
     <span class="forecast-row__time">${formatHM(start)} – ${formatHM(end)}</span>
-    <span class="forecast-row__label"><span class="dot" style="background:${color}"></span> ${groupLabel(group)}</span>
-    <span class="forecast-row__duration">${minutes} min</span>
+    <span class="forecast-row__body">
+      <span class="forecast-row__label"><span class="dot" style="background:${level.color}"></span> ${level.label}</span>
+      ${details ? `<span class="forecast-row__meta">${details}</span>` : ''}
+    </span>
+    <span class="forecast-row__duration">${formatDurationMs(win.durationMs)}</span>
     <svg viewBox="0 0 24 24" class="icon forecast-row__chevron" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
   `;
 
@@ -720,7 +686,7 @@ function buildForecastGroupEl(group, ordered, predicted, start, end, minutes) {
       return;
     }
     if (!detail.dataset.built) {
-      for (let i = group.startIndex; i <= group.endIndex; i++) {
+      for (let i = win.startIndex; i <= win.endIndex; i++) {
         const ping = ordered[i];
         detail.appendChild(buildPingRow(ping, pingOwnColor(ping), predicted[i]));
       }
@@ -970,6 +936,8 @@ function loadSettingsIntoForm() {
   document.getElementById('setOrange').value = Math.round(settings.thresholds.orangeMaxSuccessRate * 100);
   document.getElementById('setYellow').value = settings.thresholds.yellowMinLatencyMs;
   document.getElementById('setOrangeLatency').value = settings.thresholds.orangeMinLatencyMs;
+  document.getElementById('setMinCut').value = settings.minCutMin;
+  document.getElementById('setMinWindow').value = settings.minWindowMin;
 }
 
 document.getElementById('btnSaveSettings').addEventListener('click', () => {
@@ -977,6 +945,8 @@ document.getElementById('btnSaveSettings').addEventListener('click', () => {
     pingIntervalMs: Number(document.getElementById('setInterval').value) * 1000,
     pingTimeoutMs: Number(document.getElementById('setTimeout').value) * 1000,
     rollingWindowSize: Number(document.getElementById('setWindow').value),
+    minCutMin: Number(document.getElementById('setMinCut').value),
+    minWindowMin: Number(document.getElementById('setMinWindow').value),
     thresholds: {
       redMaxSuccessRate: Number(document.getElementById('setRed').value) / 100,
       orangeMaxSuccessRate: Number(document.getElementById('setOrange').value) / 100,
