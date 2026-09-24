@@ -2,13 +2,55 @@ import { colorAt } from './quality.js';
 
 const PING_POINT_RADIUS = 9;
 
+// Fond vectoriel OpenFreeMap « Bright » (gratuit, sans clé), sans les
+// lignes de ferry en pointillés. Le style est chargé et filtré une seule
+// fois pour toutes les cartes.
+const BASEMAP_STYLE_URL = 'https://tiles.openfreemap.org/styles/bright';
+const HIDDEN_LAYER_IDS = new Set(['ferry']);
+let basemapStylePromise = null;
+
+function loadBasemapStyle() {
+  if (!basemapStylePromise) {
+    basemapStylePromise = fetch(BASEMAP_STYLE_URL)
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then((style) => {
+        style.layers = style.layers.filter((layer) => !HIDDEN_LAYER_IDS.has(layer.id));
+        return style;
+      });
+  }
+  return basemapStylePromise;
+}
+
+function addRasterFallback(map) {
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors',
+    maxZoom: 19,
+  }).addTo(map);
+}
+
+function addBasemap(map) {
+  if (!L.maplibreGL || !window.maplibregl) {
+    addRasterFallback(map);
+    return;
+  }
+  loadBasemapStyle()
+    .then((style) => {
+      L.maplibreGL({
+        style,
+        attribution: '&copy; <a href="https://openfreemap.org">OpenFreeMap</a> &copy; OpenStreetMap',
+        pane: 'tilePane', // reste sous les tracés et le point GPS
+      }).addTo(map);
+    })
+    .catch(() => addRasterFallback(map));
+}
+
 export class MapView {
   constructor(elementId) {
     this.map = L.map(elementId).setView([46.6, 2.3], 6); // centre France par défaut
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; OpenStreetMap contributors',
-      maxZoom: 19,
-    }).addTo(this.map);
+    addBasemap(this.map);
 
     this.segmentLayers = [];
     this.hasFitOnce = false;
