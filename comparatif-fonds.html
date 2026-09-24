@@ -17,19 +17,18 @@
   .cell h2 { margin: 0; padding: 10px 12px; font-size: 13px; font-weight: 500; border-bottom: 1px solid #ededed; }
   .cell h2 span { color: #6b6b6b; font-weight: 400; }
   .map { height: 360px; }
-  .desature .leaflet-tile-pane { filter: grayscale(1) brightness(1.08) contrast(0.85); }
 </style>
 </head>
 <body>
 <header>
   <h1>Comparatif des fonds de carte</h1>
-  <p>Trajet Biarritz – Paris. Les quatre cartes sont synchronisées : zoome ou déplace l'une, les autres suivent.</p>
+  <p>Trajet Biarritz – Paris, fonds OpenFreeMap (gratuits, sans clé). Les quatre cartes sont synchronisées : zoome ou déplace l'une, les autres suivent.</p>
 </header>
 <div class="grid">
-  <div class="cell"><h2>1. OpenStreetMap <span>— actuel</span></h2><div id="m1" class="map"></div></div>
-  <div class="cell"><h2>2. OpenStreetMap désaturé <span>— gratuit, sans dépendance</span></h2><div id="m2" class="map desature"></div></div>
-  <div class="cell"><h2>3. OpenFreeMap Positron <span>— vectoriel, gratuit</span></h2><div id="m3" class="map"></div></div>
-  <div class="cell"><h2>4. Esri gris clair</h2><div id="m4" class="map"></div></div>
+  <div class="cell"><h2>1. Positron <span>— gris épuré</span></h2><div id="m1" class="map"></div></div>
+  <div class="cell"><h2>2. Positron colorisé <span>— eau et végétation teintées</span></h2><div id="m2" class="map"></div></div>
+  <div class="cell"><h2>3. Liberty <span>— coloré, doux</span></h2><div id="m3" class="map"></div></div>
+  <div class="cell"><h2>4. Bright <span>— coloré, contrasté</span></h2><div id="m4" class="map"></div></div>
 </div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
@@ -46,18 +45,35 @@
     if (data.length < 1000) break;
   }
   const color = (r) => !r.success ? '#e03131' : r.elapsed_ms > 3000 ? '#f08c00' : r.elapsed_ms > 300 ? '#f5c518' : '#2f9e44';
+  const STYLE = (name) => `https://tiles.openfreemap.org/styles/${name}`;
+  const ATTRIBUTION = '&copy; OpenFreeMap &copy; OpenStreetMap';
 
-  const osm = (map) => L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap', maxZoom: 19 }).addTo(map);
+  // Positron colorisé : on garde le style gris et on teinte seulement l'eau
+  // et la végétation, en pastel pour ne pas concurrencer les couleurs réseau.
+  function tintPositron(glMap) {
+    glMap.getStyle().layers.forEach((layer) => {
+      if (layer.type !== 'fill') return;
+      const sourceLayer = layer['source-layer'];
+      if (sourceLayer === 'water') glMap.setPaintProperty(layer.id, 'fill-color', '#cfe2f3');
+      if (sourceLayer === 'park') glMap.setPaintProperty(layer.id, 'fill-color', '#e2eed8');
+      if (sourceLayer === 'landcover' && /wood|forest|grass/.test(layer.id)) glMap.setPaintProperty(layer.id, 'fill-color', '#e4efdc');
+    });
+  }
+
   const bases = {
-    m1: osm,
-    m2: osm,
-    m3: (map) => L.maplibreGL({ style: 'https://tiles.openfreemap.org/styles/positron', attribution: '&copy; OpenFreeMap &copy; OpenStreetMap' }).addTo(map),
-    m4: (map) => L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', { attribution: '&copy; Esri', maxZoom: 16 }).addTo(map),
+    m1: { style: 'positron' },
+    m2: { style: 'positron', tint: true },
+    m3: { style: 'liberty' },
+    m4: { style: 'bright' },
   };
 
-  const maps = Object.entries(bases).map(([id, addBase]) => {
+  const maps = Object.entries(bases).map(([id, base]) => {
     const map = L.map(id);
-    addBase(map);
+    const layer = L.maplibreGL({ style: STYLE(base.style), attribution: ATTRIBUTION }).addTo(map);
+    if (base.tint) {
+      const glMap = layer.getMaplibreMap();
+      glMap.on('load', () => tintPositron(glMap));
+    }
     for (let i = 1; i < rows.length; i++) {
       L.polyline([[rows[i - 1].lat, rows[i - 1].lng], [rows[i].lat, rows[i].lng]], { color: color(rows[i]), weight: 5, opacity: 0.9 }).addTo(map);
     }
