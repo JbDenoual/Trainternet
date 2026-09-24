@@ -103,6 +103,52 @@ export class MapView {
       this.map.fitBounds(bounds, { maxZoom: 14 });
       this.hasFitOnce = true;
     }
+
+    if (this.currentPositionMarker) this.currentPositionMarker.bringToFront();
+  }
+
+  // Carte générale : un point coloré par zone géographique agrégée. Rendu
+  // canvas plutôt que SVG, les zones pouvant se compter par milliers. Le
+  // rayon suit le zoom (pour couvrir la case une fois zoomé) avec un minimum
+  // lisible : vue de loin, une case de 200 m ne ferait qu'un pixel.
+  renderCells(cells, cellDeg, colorForCell) {
+    this.clear();
+    if (cells.length === 0) return;
+    if (!this.canvasRenderer) this.canvasRenderer = L.canvas({ padding: 0.5 });
+    this.cellDeg = cellDeg;
+
+    cells.forEach((cell) => {
+      const color = colorForCell(cell);
+      const marker = L.circleMarker([cell.lat, cell.lng], {
+        renderer: this.canvasRenderer,
+        radius: 4,
+        stroke: false,
+        fillColor: color,
+        fillOpacity: 0.85,
+      }).addTo(this.map);
+      this.segmentLayers.push(marker);
+    });
+
+    if (!this.cellZoomHandler) {
+      this.cellZoomHandler = () => this.resizeCells();
+      this.map.on('zoomend', this.cellZoomHandler);
+    }
+
+    const bounds = L.latLngBounds(cells.map((c) => [c.lat, c.lng]));
+    this.map.fitBounds(bounds, { maxZoom: 12 });
+    this.hasFitOnce = true;
+    this.resizeCells();
+  }
+
+  resizeCells() {
+    if (!this.cellDeg) return;
+    const center = this.map.getCenter();
+    const a = this.map.latLngToContainerPoint(center);
+    const b = this.map.latLngToContainerPoint([center.lat + this.cellDeg, center.lng]);
+    const radius = Math.max(4, Math.abs(a.y - b.y) * 0.6);
+    this.segmentLayers.forEach((layer) => {
+      if (layer.setRadius) layer.setRadius(radius);
+    });
   }
 
   // Pendant l'enregistrement, on recentre en continu sur le dernier point.

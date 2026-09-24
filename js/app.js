@@ -3,7 +3,8 @@ import { getSettings, saveSettings } from './settings.js';
 import { listTrips, getTripPings, getTrip, deleteTrip } from './trips.js';
 import { Recorder } from './recorder.js';
 import { MapView } from './mapView.js';
-import { tripSummary, colorAt, COLORS, categoryRank } from './quality.js';
+import { tripSummary, colorAt, colorForCell, COLORS, categoryRank } from './quality.js';
+import { getCoverageCells, listPublicRoutes, getPublicRoutePings } from './public.js';
 
 let settings = getSettings();
 let recorder = null;
@@ -14,7 +15,38 @@ let currentTripId = null;
 let currentTripPings = []; // dernier jeu de pings statique chargé, réutilisé pour la prévision
 let forecastDirection = 'aller';
 
-const screens = ['screen-auth', 'screen-home', 'screen-review', 'screen-settings'];
+// Mode invité : pas de compte, accès en lecture seule à la carte générale et
+// aux prévisions des itinéraires connus. Mémorisé pour rouvrir l'app
+// directement sur la carte.
+const GUEST_KEY = 'trainternet_guest';
+let isGuest = readGuestFlag();
+let coverageMapView = null;
+let guestTripMapView = null;
+let guestDirection = 'aller';
+let guestRoutePings = [];
+let guestRoutesLoaded = false;
+let guestGpsWatchId = null;
+const routePingsCache = new Map();
+
+function readGuestFlag() {
+  try {
+    return localStorage.getItem(GUEST_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function setGuest(value) {
+  isGuest = value;
+  try {
+    if (value) localStorage.setItem(GUEST_KEY, '1');
+    else localStorage.removeItem(GUEST_KEY);
+  } catch {
+    // stockage indisponible (navigation privée) : le mode invité ne sera juste pas mémorisé
+  }
+}
+
+const screens = ['screen-auth', 'screen-guest', 'screen-guest-trip', 'screen-home', 'screen-review', 'screen-settings'];
 
 function showScreen(id) {
   screens.forEach((s) => document.getElementById(s).classList.toggle('active', s === id));
@@ -27,8 +59,21 @@ function showScreen(id) {
 // ---------- Routage (permet d'utiliser le bouton retour du navigateur) ----------
 
 function route() {
+  if (location.hash !== '#guest-trip') stopGuestGps();
+
   if (!currentUser) {
-    showScreen('screen-auth');
+    if (!isGuest) {
+      showScreen('screen-auth');
+      return;
+    }
+    document.getElementById('userBadge').textContent = 'Invité';
+    if (location.hash === '#guest-trip') {
+      showScreen('screen-guest-trip');
+      loadGuestTrip();
+    } else {
+      showScreen('screen-guest');
+      loadCoverageMap();
+    }
     return;
   }
 
@@ -98,19 +143,37 @@ document.getElementById('btnSignOut').addEventListener('click', async () => {
   await signOut();
 });
 
+// Point d'entrée commun quand personne n'est connecté : carte invité si le
+// mode invité a été choisi, écran de connexion sinon.
+function enterSignedOut() {
+  document.getElementById('userBadge').textContent = '';
+  if (isGuest) {
+    const onGuestScreen = location.hash === '#guest' || location.hash === '#guest-trip';
+    navigate(onGuestScreen ? location.hash : '#guest', { replace: true });
+  } else {
+    navigate('#auth', { replace: true });
+  }
+}
+
 onAuthStateChange((user) => {
   currentUser = user;
   if (user) {
+    setGuest(false);
     document.getElementById('userBadge').textContent = user.email;
-    if (!location.hash || location.hash === '#auth') {
+    const fromSignedOutScreen = ['', '#auth', '#guest', '#guest-trip'].includes(location.hash);
+    if (fromSignedOutScreen) {
       navigate('#home', { replace: true });
     } else {
       route();
     }
   } else {
-    document.getElementById('userBadge').textContent = '';
-    navigate('#auth', { replace: true });
+    enterSignedOut();
   }
+});
+
+document.getElementById('btnContinueAsGuest').addEventListener('click', () => {
+  setGuest(true);
+  navigate('#guest', { replace: true });
 });
 
 // ---------- Navigation ----------
@@ -226,10 +289,12 @@ function pingOwnColor(ping) {
   return ping.elapsedMs > settings.thresholds.yellowMinLatencyMs ? COLORS.yellow : COLORS.green;
 }
 
-function buildPingRow(ping, color) {
+// `at` permet d'afficher une heure prévue (prévision) plutôt que l'heure
+// réelle d'enregistrement du ping.
+function buildPingRow(ping, color, at = new Date(ping.sentAt)) {
   const row = document.createElement('div');
   row.className = 'ping-row';
-  const time = new Date(ping.sentAt).toLocaleTimeString('fr-FR');
+  const time = at.toLocaleTimeString('fr-FR');
   const latencyClass = LATENCY_CLASS_BY_COLOR[color] || 'ping-row__latency--red';
   const latencyText = ping.success ? `${ping.elapsedMs} ms` : 'Échec';
 
@@ -266,8 +331,7 @@ function describeGeoError(err) {
   }
 }
 
-function updateGpsStatus(position, err) {
-  const el = document.getElementById('gpsStatus');
+function updateGpsStatus(position, err, el = document.getElementById('gpsStatus')) {
   if (position) {
     el.textContent = `Position GPS : ${position.lat.toFixed(5)}, ${position.lng.toFixed(5)} (± ${Math.round(position.accuracy)} m)`;
     el.classList.remove('status-bar--warning');
@@ -561,16 +625,51 @@ function groupColor(group) {
   return `rgb(${Math.round((a.r + b.r) / 2)}, ${Math.round((a.g + b.g) / 2)}, ${Math.round((a.b + b.b) / 2)})`;
 }
 
+function paintDirectionToggle(allerId, retourId, direction) {
+  document.getElementById(allerId).className = `btn ${direction === 'aller' ? 'btn-primary' : 'btn-secondary'}`;
+  document.getElementById(retourId).className = `btn ${direction === 'retour' ? 'btn-primary' : 'btn-secondary'}`;
+}
+
 function setDirection(direction) {
   forecastDirection = direction;
-  document.getElementById('btnDirectionAller').className = `btn ${direction === 'aller' ? 'btn-primary' : 'btn-secondary'}`;
-  document.getElementById('btnDirectionRetour').className = `btn ${direction === 'retour' ? 'btn-primary' : 'btn-secondary'}`;
+  paintDirectionToggle('btnDirectionAller', 'btnDirectionRetour', direction);
   renderForecast();
 }
 
 document.getElementById('btnDirectionAller').addEventListener('click', () => setDirection('aller'));
 document.getElementById('btnDirectionRetour').addEventListener('click', () => setDirection('retour'));
 document.getElementById('departureTime').addEventListener('change', renderForecast);
+
+// Prévision complète (liste + carte regroupée), partagée entre l'onglet
+// Prévision d'un trajet et l'écran invité.
+function drawForecast({ pings, direction, departureValue, listEl, mapView }) {
+  const { ordered, segments } = computeRawSegments(pings, direction, settings);
+  const thresholdMs = settings.rollingWindowSize * settings.pingIntervalMs * 2;
+  const groups = mergeIdenticalAdjacentGroups(mergeAdjacentSegments(segments, thresholdMs));
+
+  const [h, m] = departureValue.split(':').map(Number);
+  const departure = new Date();
+  departure.setHours(h || 0, m || 0, 0, 0);
+
+  // Heure prévue de chaque ping : départ + temps écoulé depuis le premier
+  // ping dans l'ordre de lecture choisi (aller ou retour).
+  const predicted = [departure];
+  for (let i = 1; i < ordered.length; i++) {
+    const gap = Math.abs(new Date(ordered[i].sentAt) - new Date(ordered[i - 1].sentAt));
+    predicted.push(new Date(predicted[i - 1].getTime() + gap));
+  }
+
+  listEl.innerHTML = '';
+  let cursor = departure;
+  groups.forEach((group) => {
+    const start = cursor;
+    cursor = new Date(cursor.getTime() + group.durationMs);
+    const minutes = Math.max(1, Math.round(group.durationMs / 60000));
+    listEl.appendChild(buildForecastGroupEl(group, ordered, predicted, start, cursor, minutes));
+  });
+
+  mapView.renderGrouped(ordered, groups, (g) => groupColor(g));
+}
 
 function renderForecast() {
   const listEl = document.getElementById('forecastList');
@@ -583,29 +682,19 @@ function renderForecast() {
     return;
   }
 
-  const { ordered, segments } = computeRawSegments(currentTripPings, forecastDirection, settings);
-  const thresholdMs = settings.rollingWindowSize * settings.pingIntervalMs * 2;
-  const groups = mergeIdenticalAdjacentGroups(mergeAdjacentSegments(segments, thresholdMs));
-
-  const [h, m] = document.getElementById('departureTime').value.split(':').map(Number);
-  let cursor = new Date();
-  cursor.setHours(h || 0, m || 0, 0, 0);
-
-  listEl.innerHTML = '';
-  groups.forEach((group) => {
-    const start = new Date(cursor);
-    cursor = new Date(cursor.getTime() + group.durationMs);
-    const minutes = Math.max(1, Math.round(group.durationMs / 60000));
-    listEl.appendChild(buildForecastGroupEl(group, ordered, start, new Date(cursor), minutes));
-  });
-
   if (!forecastMapView) forecastMapView = new MapView('mapForecast');
-  forecastMapView.renderGrouped(ordered, groups, (g) => groupColor(g));
+  drawForecast({
+    pings: currentTripPings,
+    direction: forecastDirection,
+    departureValue: document.getElementById('departureTime').value,
+    listEl,
+    mapView: forecastMapView,
+  });
 }
 
 // Ligne de groupe repliable : un clic déplie le détail des pings bruts
-// couverts par ce groupe (heure, position, temps de réponse).
-function buildForecastGroupEl(group, ordered, start, end, minutes) {
+// couverts par ce groupe (heure prévue, position, temps de réponse).
+function buildForecastGroupEl(group, ordered, predicted, start, end, minutes) {
   const color = groupColor(group);
   const wrapper = document.createElement('div');
   wrapper.className = 'forecast-group';
@@ -633,7 +722,7 @@ function buildForecastGroupEl(group, ordered, start, end, minutes) {
     if (!detail.dataset.built) {
       for (let i = group.startIndex; i <= group.endIndex; i++) {
         const ping = ordered[i];
-        detail.appendChild(buildPingRow(ping, pingOwnColor(ping)));
+        detail.appendChild(buildPingRow(ping, pingOwnColor(ping), predicted[i]));
       }
       detail.dataset.built = '1';
     }
@@ -644,6 +733,141 @@ function buildForecastGroupEl(group, ordered, start, end, minutes) {
   wrapper.appendChild(row);
   wrapper.appendChild(detail);
   return wrapper;
+}
+
+// ---------- Invité : carte générale ----------
+
+const COVERAGE_CELL_DEG = 0.002; // ≈ 200 m, doit rester ≥ au plancher côté SQL
+
+document.getElementById('btnGuestLogin').addEventListener('click', () => {
+  setGuest(false);
+  navigate('#auth', { replace: true });
+});
+document.getElementById('btnGuestStartTrip').addEventListener('click', () => navigate('#guest-trip'));
+document.getElementById('btnGuestBack').addEventListener('click', () => navigate('#guest', { replace: true }));
+
+async function loadCoverageMap() {
+  if (!coverageMapView) coverageMapView = new MapView('mapCoverage');
+  coverageMapView.invalidate();
+  const summaryEl = document.getElementById('coverageSummary');
+  summaryEl.textContent = 'Chargement de la couverture…';
+  try {
+    const cells = await getCoverageCells(COVERAGE_CELL_DEG, settings.thresholds.orangeMinLatencyMs);
+    coverageMapView.renderCells(cells, COVERAGE_CELL_DEG, (cell) => colorForCell(cell, settings));
+    const total = cells.reduce((sum, c) => sum + c.ping_count, 0);
+    summaryEl.textContent = cells.length === 0
+      ? 'Aucune donnée de couverture pour le moment.'
+      : `${total.toLocaleString('fr-FR')} pings agrégés, tous trajets confondus`;
+  } catch (err) {
+    summaryEl.textContent = `Couverture indisponible : ${err.message}`;
+  }
+}
+
+// ---------- Invité : prévision sur un itinéraire connu ----------
+
+function formatDuration(minutes) {
+  if (minutes < 60) return `${minutes} min`;
+  return `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, '0')}`;
+}
+
+async function loadGuestTrip() {
+  if (!guestTripMapView) guestTripMapView = new MapView('mapGuestTrip');
+  guestTripMapView.invalidate();
+  startGuestGps();
+
+  const timeInput = document.getElementById('guestDepartureTime');
+  if (!timeInput.value) timeInput.value = defaultTimeString();
+
+  const select = document.getElementById('guestRoute');
+  if (!guestRoutesLoaded) {
+    select.innerHTML = '<option value="">Chargement…</option>';
+    select.disabled = true;
+    try {
+      const routes = await listPublicRoutes();
+      select.innerHTML = routes.length
+        ? routes.map((r) => `<option value="${r.id}">${escapeHtml(r.name)} · ${formatDuration(r.duration_min)}</option>`).join('')
+        : '<option value="">Aucun itinéraire disponible</option>';
+      select.disabled = routes.length === 0;
+      guestRoutesLoaded = true;
+    } catch (err) {
+      select.innerHTML = '<option value="">Itinéraires indisponibles</option>';
+      document.getElementById('guestForecastList').innerHTML =
+        `<div class="empty-state">Itinéraires indisponibles : ${escapeHtml(err.message)}</div>`;
+      return;
+    }
+  }
+  await selectGuestRoute(select.value);
+}
+
+async function selectGuestRoute(routeId) {
+  const listEl = document.getElementById('guestForecastList');
+  guestRoutePings = [];
+  if (routeId) {
+    listEl.innerHTML = '<div class="empty-state">Chargement…</div>';
+    try {
+      if (!routePingsCache.has(routeId)) routePingsCache.set(routeId, await getPublicRoutePings(routeId));
+      guestRoutePings = routePingsCache.get(routeId);
+    } catch (err) {
+      listEl.innerHTML = `<div class="empty-state">Erreur : ${escapeHtml(err.message)}</div>`;
+      return;
+    }
+  }
+  renderGuestForecast();
+}
+
+function renderGuestForecast() {
+  const listEl = document.getElementById('guestForecastList');
+  if (guestRoutePings.length < 2) {
+    listEl.innerHTML = '<div class="empty-state">Choisis un itinéraire pour voir la prévision.</div>';
+    guestTripMapView.clear();
+    return;
+  }
+  drawForecast({
+    pings: guestRoutePings,
+    direction: guestDirection,
+    departureValue: document.getElementById('guestDepartureTime').value,
+    listEl,
+    mapView: guestTripMapView,
+  });
+}
+
+function setGuestDirection(direction) {
+  guestDirection = direction;
+  paintDirectionToggle('btnGuestDirAller', 'btnGuestDirRetour', direction);
+  renderGuestForecast();
+}
+
+document.getElementById('guestRoute').addEventListener('change', (e) => selectGuestRoute(e.target.value));
+document.getElementById('btnGuestDirAller').addEventListener('click', () => setGuestDirection('aller'));
+document.getElementById('btnGuestDirRetour').addEventListener('click', () => setGuestDirection('retour'));
+document.getElementById('guestDepartureTime').addEventListener('change', renderGuestForecast);
+
+// Position de l'invité sur la carte, sans rien enregistrer. Le suivi GPS ne
+// tourne que tant que l'écran de prévision invité est affiché.
+function startGuestGps() {
+  if (guestGpsWatchId !== null) return;
+  const statusEl = document.getElementById('guestGpsStatus');
+  if (!('geolocation' in navigator)) {
+    updateGpsStatus(null, { code: 0, message: 'géolocalisation indisponible sur cet appareil' }, statusEl);
+    return;
+  }
+  updateGpsStatus(null, null, statusEl);
+  guestGpsWatchId = navigator.geolocation.watchPosition(
+    (pos) => {
+      const position = { lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy };
+      updateGpsStatus(position, null, statusEl);
+      guestTripMapView.setCurrentPosition(position.lat, position.lng);
+    },
+    (err) => updateGpsStatus(null, err, statusEl),
+    { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
+  );
+}
+
+function stopGuestGps() {
+  if (guestGpsWatchId === null) return;
+  navigator.geolocation.clearWatch(guestGpsWatchId);
+  guestGpsWatchId = null;
+  if (guestTripMapView) guestTripMapView.clearCurrentPosition();
 }
 
 document.getElementById('btnStartTrip').addEventListener('click', async () => {
@@ -777,6 +1001,6 @@ document.getElementById('btnSaveSettings').addEventListener('click', () => {
       route();
     }
   } else {
-    navigate('#auth', { replace: true });
+    enterSignedOut();
   }
 })();

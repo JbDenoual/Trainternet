@@ -42,6 +42,20 @@ export function colorAt(pings, index, settings) {
   return colorForWindow(win, settings.thresholds);
 }
 
+// Couleur d'une case de la carte générale (pings agrégés de tous les
+// trajets passés par là). Mêmes seuils que la fenêtre glissante ; la règle
+// "un ping trop lent rend la fenêtre instable" devient une proportion : la
+// case est instable si au moins 1 ping sur N (N = taille de fenêtre) est lent.
+export function colorForCell(cell, settings) {
+  const t = settings.thresholds;
+  const successRate = cell.success_count / cell.ping_count;
+  if (successRate < t.redMaxSuccessRate) return COLORS.red;
+  if (successRate < t.orangeMaxSuccessRate) return COLORS.orange;
+  if (cell.slow_count / cell.ping_count >= 1 / settings.rollingWindowSize) return COLORS.orange;
+  if (cell.avg_ok_latency_ms > t.yellowMinLatencyMs) return COLORS.yellow;
+  return COLORS.green;
+}
+
 // Ordre des catégories du meilleur au pire réseau, utilisé pour regrouper
 // des zones de catégories voisines (ex: bon/lent qui alternent).
 export const CATEGORY_ORDER = [COLORS.green, COLORS.yellow, COLORS.orange, COLORS.red];

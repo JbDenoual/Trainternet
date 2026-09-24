@@ -1,10 +1,10 @@
 {
-  "name": "TchouTchou",
-  "short_name": "TchouTchou",
+  "name": "Trainternet",
+  "short_name": "Trainternet",
   "start_url": ".",
   "display": "standalone",
-  "background_color": "#1a1a1a",
-  "theme_color": "#1a1a1a",
+  "background_color": "#fcfcfc",
+  "theme_color": "#ffffff",
   "icons": [
     { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
     { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
