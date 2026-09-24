@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Comparatif des fonds de carte</title>
+<!-- Page temporaire pour choisir le fond de carte de Trainternet. -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
+<style>
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #fcfcfc; color: #171717; }
+  header { padding: 14px 16px; border-bottom: 1px solid #ededed; background: #fff; }
+  header h1 { margin: 0; font-size: 16px; font-weight: 500; }
+  header p { margin: 4px 0 0; font-size: 13px; color: #6b6b6b; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; padding: 12px; }
+  .cell { border: 1px solid #ededed; border-radius: 8px; overflow: hidden; background: #fff; }
+  .cell h2 { margin: 0; padding: 10px 12px; font-size: 13px; font-weight: 500; border-bottom: 1px solid #ededed; }
+  .cell h2 span { color: #6b6b6b; font-weight: 400; }
+  .map { height: 360px; }
+  .desature .leaflet-tile-pane { filter: grayscale(1) brightness(1.08) contrast(0.85); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Comparatif des fonds de carte</h1>
+  <p>Trajet Biarritz – Paris. Les quatre cartes sont synchronisées : zoome ou déplace l'une, les autres suivent.</p>
+</header>
+<div class="grid">
+  <div class="cell"><h2>1. OpenStreetMap <span>— actuel</span></h2><div id="m1" class="map"></div></div>
+  <div class="cell"><h2>2. OpenStreetMap désaturé <span>— gratuit, sans dépendance</span></h2><div id="m2" class="map desature"></div></div>
+  <div class="cell"><h2>3. OpenFreeMap Positron <span>— vectoriel, gratuit</span></h2><div id="m3" class="map"></div></div>
+  <div class="cell"><h2>4. Esri gris clair</h2><div id="m4" class="map"></div></div>
+</div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script type="module">
+  import { SUPABASE_URL, SUPABASE_ANON_KEY } from './js/config.js';
+
+  const client = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  let rows = [];
+  for (let offset = 0; ; offset += 1000) {
+    const { data } = await client.rpc('public_route_pings', { p_trip_id: 'f70c23d0-bdbd-4d77-98d0-a74e5478b278' }).range(offset, offset + 999);
+    rows = rows.concat(data);
+    if (data.length < 1000) break;
+  }
+  const color = (r) => !r.success ? '#e03131' : r.elapsed_ms > 3000 ? '#f08c00' : r.elapsed_ms > 300 ? '#f5c518' : '#2f9e44';
+
+  const osm = (map) => L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap', maxZoom: 19 }).addTo(map);
+  const bases = {
+    m1: osm,
+    m2: osm,
+    m3: (map) => L.maplibreGL({ style: 'https://tiles.openfreemap.org/styles/positron', attribution: '&copy; OpenFreeMap &copy; OpenStreetMap' }).addTo(map),
+    m4: (map) => L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', { attribution: '&copy; Esri', maxZoom: 16 }).addTo(map),
+  };
+
+  const maps = Object.entries(bases).map(([id, addBase]) => {
+    const map = L.map(id);
+    addBase(map);
+    for (let i = 1; i < rows.length; i++) {
+      L.polyline([[rows[i - 1].lat, rows[i - 1].lng], [rows[i].lat, rows[i].lng]], { color: color(rows[i]), weight: 5, opacity: 0.9 }).addTo(map);
+    }
+    map.setView([44.95, -0.45], 10);
+    return map;
+  });
+
+  // Synchronisation : bouger une carte recale les trois autres.
+  let syncing = false;
+  maps.forEach((source) => {
+    source.on('moveend', () => {
+      if (syncing) return;
+      syncing = true;
+      maps.forEach((m) => { if (m !== source) m.setView(source.getCenter(), source.getZoom(), { animate: false }); });
+      syncing = false;
+    });
+  });
+</script>
+</body>
+</html>
